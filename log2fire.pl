@@ -163,7 +163,7 @@ sub check_args {
   GetOptions (
               # required
               "f|file=s" =>  \$glob_files, # only one can be used:
-			  "filter|filter_files=s" => \$filter_files, # to filter granulary files with a callback
+	      "filter|filter_files=s" => \$filter_files, # to filter granulary files with a callback
               "command=s" =>  \$command, # or file or command  see check_config
               "regex_valid_line=s" =>  \$valid_rex,
               "pattern_separator=s" => \$rec_sep,
@@ -485,11 +485,13 @@ __DATA__
               newly created files
               
    -r --regex_valid_line str
-              is the regex to validate every line read from log.
+              is the regex to validate every line read from log. Internally compiled
+	      with qr//
               Lines that does not match this regex are skipped
 
    -p --pattern_separator str
-              this required regex is used to split a valid line into fields
+              this required regex is used to split a valid line into fields.
+	      Internally compiled with qr//
 
    -i --ip_position  int
               is the position, starting from zro, where remote IPs are found.
@@ -518,8 +520,8 @@ __DATA__
    OPTIONAL ARGUMENTS
    
    -filter --filter_files code string
-			  pass a string containing an anonymous sub to filter files globbed.
-			  The sub must return 1 if the the current file is to be processed and
+	      pass a string containing an anonymous sub to filter files globbed.
+	      The sub must return 1 if the the current file is to be processed and
               0 otherwise. This can be used to just process the today logfile.			
    
    -d --discount int
@@ -655,6 +657,9 @@ very own risk. As always.
 
 
 =head1 BUGS AND LIMITATIONS
+
+On win32 systems the program does not check the modification time of the files to read
+being this unreliable: instead it parse anyway the file since the last read line on.
 
 On win32 systems only CTRL-C can be safely caugth. So if you kill from something like
 the task manager, no cleanup of jobs is done. Probably you'll end with a bad
