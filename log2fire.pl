@@ -5,10 +5,16 @@ use File::Basename;
 use Getopt::Long;
 use Pod::Usage;
 
+my $VERSION = 19;
+
 ## GLOBALS SET BY COMMAND LINE ARGUMENTS
 
 # glob to include more files
 my $glob_files;
+# filter files with a callback passed via commandline and evaluated in check_args
+my $filter_files;
+# string used to display the sub
+my $filter_files_string;
 # files to be scanned
 my @files;
 # command output instead of logfiles
@@ -79,6 +85,7 @@ check_args();
 # open logfile for write
 open my $output, '>>', $log_file or die "ERROR unable to open $log_file for appending.";
 # be sure that everything is in the logfile
+		$output->autoflush(1);#v17
 select $output;
 # expand the glob for first time (glob will be rerun every iteration)
 @files = glob($glob_files);
@@ -114,37 +121,49 @@ map {$white_list{$_} = 1} @wlist;
 ## MAIN LOOP
 
 while (1) {
-      biprint ("\n",scalar localtime(time)."\n") if $verbosity > 1;
-      # get relevants lines from command output
-      if ($command){ proc_command();  }
-      # or from logfiles
-      else {tell_files(glob $glob_files);}
-      # caches are full, go enqueing jobs
-      &enq_jobs;
-      if ($verbosity > 2) {
-          biprint ("IP global occurrences history (more than $max_occ times):\n");
-          biprint (
-          map {qq($_\t\t$ip_count{$_}\n)}
-              sort { $ip_count{$a} <=> $ip_count{$b} } keys %ip_count
-          );
-          biprint("\n");
-      }
-      # executon time
-      &exec_jobs;
-      biprint ( "\n".(scalar keys %job).
-                " jobs pending:\n") if $verbosity > 1;
-      biprint (map {"$_ ".scalar localtime($job{$_})."\n"}
-                sort { $job{$a} <=> $job{$b}} keys %job) if $verbosity > 2;
+		biprint ("\n",scalar localtime(time)."\n") if $verbosity > 1;
+		# get relevants lines from command output
+		if ($command){ proc_command();  }
+		# or from logfiles
+		else {
+			my @files  = grep {$filter_files->($_)} glob $glob_files;
+			biprint (scalar @files, " files to process (".(join ' ',@files),")\n")  if $verbosity > 1;
+			if (scalar @files){
+				tell_files( @files );
+			}
+			else{
+				sleep 1 for 1..$wait;
+				next;
+			}
+			
+		}
+		# caches are full, go enqueing jobs
+		&enq_jobs;
+		if ($verbosity > 2) {
+		  biprint ("IP global occurrences history (more than $max_occ times):\n");
+		  biprint (
+		  map {qq($_\t\t$ip_count{$_}\n)}
+			  sort { $ip_count{$a} <=> $ip_count{$b} } keys %ip_count
+		  );
+		  biprint("\n");
+		}
+		# executon time
+		&exec_jobs;
+		biprint ( "\n".(scalar keys %job).
+				" jobs pending:\n") if $verbosity > 1;
+		biprint (map {"$_ ".scalar localtime($job{$_})."\n"}
+				sort { $job{$a} <=> $job{$b}} keys %job) if $verbosity > 2;
 
-      #Setting the environment variable PERL_SIGNALS=unsafe allows ^C to interupt sleep.
-      #from http://www.perlmonks.org/?node=552515
-      sleep 1 for 1..$wait;
+		#Setting the environment variable PERL_SIGNALS=unsafe allows ^C to interupt sleep.
+		#from http://www.perlmonks.org/?node=552515
+		sleep 1 for 1..$wait;
 }
 ################################################################################
 sub check_args {
   GetOptions (
               # required
-              "file=s" =>  \$glob_files, # only one can be used:
+              "f|file=s" =>  \$glob_files, # only one can be used:
+			  "filter|filter_files=s" => \$filter_files, # to filter granulary files with a callback
               "command=s" =>  \$command, # or file or command  see check_config
               "regex_valid_line=s" =>  \$valid_rex,
               "pattern_separator=s" => \$rec_sep,
@@ -166,10 +185,23 @@ sub check_args {
               # f c r p i m|o s b u d t l e|X w g v h
               ) or pod2usage("ERROR parsing command line\n");
 
-  if ($help > 0){pod2usage(-verbose => 2,-message => "\nHelp for $0:\n")}
-  if ($glob_files && $command){
-        #die "ERROR --file and --command cannot coexists";
-  }
+	if ($help > 0){pod2usage(-verbose => 2,-message => "\nHelp for $0:\n")}
+	if ($glob_files && $command){
+		die "ERROR --file and --command cannot coexists";
+	}
+	if ( $filter_files ){
+		local $@;
+		my $code = eval $filter_files;
+		if($@){
+			print "ERROR code passed (-->$filter_files<--) does not compile!\n$@\n";
+			exit 1;
+		}
+		else{
+				$filter_files_string = $filter_files;
+				$filter_files = $code;			
+		}
+	}
+	else {$filter_files = sub{1}; $filter_files_string = 'sub{1}' }
 }
 ################################################################################
 sub check_config{
@@ -183,7 +215,8 @@ sub check_config{
           "--file or --command --regex_valid_line --pattern_separator --ip_position --max --sleep --block_rule --unblock_rule\n\n".
           "--max and --sleep have some default, other must be specified in command line.\n\n".
           (sprintf '%-20s',"--file").($glob_files ? "glob $glob_files":'')."\n".
-          (sprintf '%-20s',"--command").($command ? $command : '')."\n".
+		  (sprintf '%-20s',"--filter_files")."$filter_files_string\n".
+		  (sprintf '%-20s',"--command").($command ? $command : '')."\n".
           (sprintf '%-20s',"--regex_valid_line")."$valid_rex\n".
           (sprintf '%-20s',"--pattern_separator")."$rec_sep\n".
           (sprintf '%-20s',"--ip_position")."$ip_pos\n".
@@ -200,9 +233,13 @@ sub check_config{
               # create the entry in visited_file cache
               #$visited_files{$command}=[0,0];
           }
+		  
 }
 ################################################################################
 sub tell_files {
+	unless (scalar @_){
+				print "No file to process\n" if  $verbosity > 0;
+	}
   foreach my $file (@_){
 
       unless (-e $file){
@@ -218,10 +255,18 @@ sub tell_files {
                 "(last modified: ".scalar localtime($mtime).")\n") if $verbosity > 0;
           $read_pointer = $visited_files{$file}[1];
       }
+	  # v18 modification for win32 files where timestamp is NOT updated correctly
+      elsif(exists $visited_files{$file} and $^O eq 'MSWin32'){
+			biprint ("processing anyway (MSWin32) $file from line ".
+                ($visited_files{$file}[1]|| 0).
+                "(last modified: ".scalar localtime($mtime).")\n") if $verbosity > 0;
+          $read_pointer = $visited_files{$file}[1];
+	  }
+	  # END v18 modification for win32 files where timestamp is NOT updated correctly
       #file not updated are skipped
       elsif (exists $visited_files{$file} and $visited_files{$file}[0] >= $mtime ){
           biprint ("skipping $file because was not modified from last scan(".
-                scalar localtime($visited_files{$file}[0]).")\n") if $verbosity > 0;
+                scalar localtime($visited_files{$file}[0]).")\n") if $verbosity > 1; #v17 was > 0
           next;
       }
       # new files
@@ -252,6 +297,7 @@ sub proc_file{
 }
 ################################################################################
 sub proc_command{
+	die "parsing command output still unimplemented..";
   open $cmd_handle,"$command|" or die "ERROR opening [$command]!";
   my $proc_lines = 0;
   while (<$cmd_handle>){
@@ -386,6 +432,7 @@ sub show_config{
       return "$0 running on $^O at ".scalar(localtime(time))."\n".
       "current configuration:\n\n".
       (sprintf '%-35s',"-f files to read").($glob_files ? "glob $glob_files":'')."\n".
+	  (sprintf '%-35s',"-filter_files")."$filter_files_string\n".		  
       (sprintf '%-35s',"-c command").($command ? $command : '')."\n".
       (sprintf '%-35s',"-r regex of valid lines")."$valid_rex\n".
       (sprintf '%-35s',"-p regex to split valid lines")."$rec_sep\n".
@@ -407,6 +454,7 @@ sub show_config{
 sub clean_up {
     if ($effectively_run == 0){
         biprint ("OK Nothing to clean on a DRY RUN\n");
+		close $cmd_handle if $cmd_handle;
         exit;
     }
     biprint("WARNING $0 was ask to terminate and will try to remove all applied rules\n");
@@ -415,6 +463,7 @@ sub clean_up {
     biprint ("\n".(scalar keys %job)." jobs pending:\n");
     biprint (map {"$_ ".scalar localtime($job{$_})."\n"} sort { $job{$a} <=> $job{$b}} keys %job);
     biprint ("ERROR ".(scalar keys %job)."jobs still pending! review your firewall!\n") if scalar keys %job;
+	close $cmd_handle if $cmd_handle;
     exit;
 }
 __DATA__
@@ -467,6 +516,11 @@ __DATA__
 
 
    OPTIONAL ARGUMENTS
+   
+   -filter --filter_files code string
+			  pass a string containing an anonymous sub to filter files globbed.
+			  The sub must return 1 if the the current file is to be processed and
+              0 otherwise. This can be used to just process the today logfile.			
    
    -d --discount int
               after reaching the --max number of occurences and after having been
